@@ -18,40 +18,24 @@ def normalize_text(text):
 
 # --- 2. 核心函數：動態球場牆界計算 ---
 def get_wall_radius(theta):
-    """
-    根據角度計算球場全壘打牆的物理距離 (簡化版球場模型)
-    中外野 (pi/2) 約 400ft, 左右邊線 (pi/4, 3pi/4) 約 325ft
-    """
-    # 使用餘弦函數模擬中外野突出的形狀
-    # 當 theta = pi/2 (90度), cos(2*(theta-pi/2)) = 1 -> 半徑最大
-    # 當 theta = pi/4 或 3pi/4, cos 為負 -> 半徑最小
-    base_wall = 355  # 平均半徑
-    depth_variation = 45  # 深度變化量
+    base_wall = 355
+    depth_variation = 45
     return base_wall + depth_variation * np.cos(2 * (theta - np.pi / 2))
 
 
-# --- 3. 核心函數：座標轉換 (包含牆界限制) ---
+# --- 3. 核心函數：座標轉換 ---
 def transform_coords_refined(hc_x, hc_y, distance, events):
     if pd.isna(hc_x) or pd.isna(hc_y) or (hc_x == 0 and hc_y == 0):
         return None, None
-
-    # 1. 計算角度 theta
     theta_offset = (hc_x - 125.42) * 0.0085
     theta = np.pi / 2 - theta_offset
     theta = np.clip(theta, np.pi / 4 + 0.01, 3 * np.pi / 4 - 0.01)
-
-    # 2. 取得該方向的牆界半徑
     wall_at_angle = get_wall_radius(theta)
-
-    # 3. 決定視覺半徑 r
     r = float(distance) if not pd.isna(distance) else 15.0
     r = max(r, 18.0)
-
-    # 邏輯核心：如果是出局球 (Sac Fly/Field Out)，距離絕對不能超過該處的牆界
     is_hr = 'home run' in str(events).lower()
     if not is_hr and r >= (wall_at_angle - 5):
-        r = wall_at_angle - 8  # 強制縮回到牆內 8 英尺處，模擬牆前接殺
-
+        r = wall_at_angle - 8
     tx = r * np.cos(theta)
     ty = r * np.sin(theta)
     return tx, ty
@@ -61,31 +45,22 @@ def transform_coords_refined(hc_x, hc_y, distance, events):
 def plot_spray_chart(df):
     fig = go.Figure()
     t_range = np.linspace(np.pi / 4, 3 * np.pi / 4, 100)
-
-    # 繪製動態全壘打牆 (符合現實: 中外野深、邊線淺)
     wall_radii = [get_wall_radius(t) for t in t_range]
     wall_x = [r * np.cos(t) for r, t in zip(wall_radii, t_range)]
     wall_y = [r * np.sin(t) for r, t in zip(wall_radii, t_range)]
-
-    # 草皮與紅土
     fig.add_trace(
         go.Scatter(x=[0] + wall_x + [0], y=[0] + wall_y + [0], fill='toself', fillcolor='rgba(34, 139, 34, 0.2)',
                    line_width=0, showlegend=False))
     fig.add_trace(
         go.Scatter(x=[0] + (145 * np.cos(t_range)).tolist() + [0], y=[0] + (145 * np.sin(t_range)).tolist() + [0],
                    fill='toself', fillcolor='rgba(255, 165, 0, 0.3)', line_width=0, showlegend=False))
-
-    # 紅色動態牆線
     fig.add_trace(
         go.Scatter(x=wall_x, y=wall_y, mode='lines', line=dict(color='red', dash='dash', width=3), name='全壘打牆'))
-
-    # 壘包
     s = 90 / np.sqrt(2)
     fig.add_trace(
         go.Scatter(x=[0, s, 0, -s, 0], y=[0, s, s * 2, s, 0], mode='lines+markers', line=dict(color='black', width=3),
                    marker=dict(symbol='square', size=13, color='white', line=dict(width=1.5, color='black')),
                    showlegend=False))
-
     for i, row in df.iterrows():
         tx, ty = transform_coords_refined(row['hc_x'], row['hc_y'], row['hit_distance_sc'], row['events'])
         if tx is not None:
@@ -93,14 +68,13 @@ def plot_spray_chart(df):
                                      marker=dict(size=18, color=row['color'], line=dict(width=1.5, color='black')),
                                      hovertemplate=f"打席: {i + 1}<br>結果: {row['events']}<br>距離: {row['hit_distance_sc']} ft",
                                      showlegend=False))
-
     fig.update_layout(xaxis=dict(visible=False, range=[-400, 400], scaleanchor="y", scaleratio=1),
                       yaxis=dict(visible=False, range=[-30, 500]), width=700, height=700, plot_bgcolor='rgba(0,0,0,0)',
                       margin=dict(l=0, r=0, t=30, b=0))
     return fig
 
 
-# --- 5. 數據邏輯 (與先前一致) ---
+# --- 5. 數據邏輯 ---
 if 'data_cache' not in st.session_state: st.session_state.data_cache = None
 if 'p_name' not in st.session_state: st.session_state.p_name = ""
 
@@ -123,7 +97,8 @@ if st.sidebar.button("查詢資料"):
                         l = all_l[all_l['f_norm'] == normalize_text(f_in)].head(1)
                 if not l.empty:
                     res = l.iloc[0]
-                    st.session_state.p_name = f"{res['name_first']} {res['name_last']}"
+                    # 關鍵：直接存入並立刻轉大寫
+                    st.session_state.p_name = f"{res['name_first']} {res['name_last']}".title()
                     pid = res['key_mlbam']
                     raw = statcast_batter('2024-03-01', '2026-12-31', pid)
                     st.session_state.data_cache = raw[raw['events'].notna()].copy()
@@ -132,10 +107,12 @@ if st.sidebar.button("查詢資料"):
     except Exception as e:
         st.error(f"錯誤: {e}")
 
+# --- 6. 顯示端 ---
 if st.session_state.data_cache is not None:
     df = st.session_state.data_cache
     df['game_date'] = pd.to_datetime(df['game_date']).dt.date
-    sel_date = st.sidebar.selectbox("選擇日期", sorted(df['game_date'].unique(), reverse=True)[:10])
+    dates = sorted(df['game_date'].unique(), reverse=True)[:10]
+    sel_date = st.sidebar.selectbox("選擇日期", dates)
     curr = df[df['game_date'] == sel_date].copy().sort_values('at_bat_number').reset_index(drop=True)
     curr['events'] = curr['events'].str.replace('_', ' ').str.replace('intent walk', 'intentional walk', case=False)
 
@@ -143,14 +120,29 @@ if st.session_state.data_cache is not None:
              '#D62728']
     curr['color'] = [clist[i % len(clist)] for i in range(len(curr))]
 
-    st.title(f"{st.session_state.p_name} - {sel_date}")
+    # --- 終極修正：改用普通 Text 標籤避免 H1 強制小寫 ---
+    final_name = " ".join([w.capitalize() for w in str(st.session_state.p_name).split()])
+
+    # 這裡我們換個招數：不用 H1，用 Markdown 的 div 並強制樣式
+    st.markdown(f"""
+        <div style="font-size:40px; font-weight:bold; text-transform:none !important; color:inherit;">
+            {final_name} - {sel_date}
+        </div>
+        <hr>
+    """, unsafe_allow_html=True)
+
+    # DEBUG: 如果畫面還是小寫，請看下面這行是不是大寫
+    # st.write(f"DEBUG (Python 看到的內容): {final_name}")
+
     c1, c2 = st.columns([1.2, 1])
     with c1:
         st.plotly_chart(plot_spray_chart(curr), use_container_width=True)
     with c2:
+        st.subheader("📊 打席明細")
         t_df = curr[['events', 'launch_speed', 'launch_angle', 'hit_distance_sc']].copy()
         t_df.columns = ['結果', '初速(mph)', '仰角(°)', '距離(ft)']
-        for col in t_df.columns[1:]: t_df[col] = pd.to_numeric(t_df[col]).fillna(0.0).map('{:.1f}'.format)
+        for col in t_df.columns[1:]:
+            t_df[col] = pd.to_numeric(t_df[col]).fillna(0.0).map('{:.1f}'.format)
         t_df.insert(0, '打席', range(1, len(t_df) + 1))
         st.table(t_df.style.apply(
             lambda r: [f'background-color: {curr.loc[r.name, "color"]}; color: black; font-weight: bold'] * len(r),
