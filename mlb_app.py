@@ -12,7 +12,8 @@ st.set_page_config(layout="wide", page_title="MLB 球員分析系統")
 # --- 1. 核心函數：處理特殊字元 ---
 def normalize_text(text):
     if not isinstance(text, str): return ""
-    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower()
+    # 分解重音符號並移除 (例如 Báez -> Baez)
+    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower().strip()
 
 # --- 2. 核心函數：動態球場牆界計算 ---
 def get_wall_radius(theta):
@@ -33,7 +34,7 @@ def transform_coords_refined(hc_x, hc_y, distance, events):
     ty = r * np.sin(theta)
     return tx, ty
 
-# --- 4. 繪圖函數：強化全壘打視覺特徵 ---
+# --- 4. 繪圖函數 ---
 def plot_spray_chart(df):
     fig = go.Figure()
     t_range = np.linspace(np.pi / 4, 3 * np.pi / 4, 100)
@@ -62,7 +63,7 @@ def plot_spray_chart(df):
     fig.update_layout(xaxis=dict(visible=False, range=[-400, 400], scaleanchor="y", scaleratio=1), yaxis=dict(visible=False, range=[-30, 500]), width=700, height=700, plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=30, b=0))
     return fig
 
-# --- 5. 數據邏輯：超強化搜尋機制 ---
+# --- 5. 數據邏輯：地毯式搜尋策略 ---
 if 'data_cache' not in st.session_state: st.session_state.data_cache = None
 if 'p_name' not in st.session_state: st.session_state.p_name = ""
 
@@ -73,38 +74,30 @@ if st.sidebar.button("查詢資料"):
     try:
         names = p_query.split()
         if len(names) >= 1:
-            with st.spinner('搜尋球員中...'):
-                # 嘗試多種搜尋策略
-                search_results = []
+            with st.spinner('正在從資料庫撈取球員...'):
+                # 策略：只搜最後一個單字（姓氏），把所有同姓的人都抓回來
+                last_name_to_search = names[-1]
+                potential_players = playerid_lookup(last_name_to_search)
                 
-                # 策略 A: 直接搜尋最後一個字當姓
-                if len(names) >= 2:
-                    search_results.append(playerid_lookup(names[-1], names[0]))
-                
-                # 策略 B: 如果 A 失敗，或是只有一個字，搜尋整個字串
-                if not search_results or search_results[0].empty:
-                    search_results.append(playerid_lookup(names[-1]))
-                
-                # 策略 C: 處理 Baez 這種特殊案例 (去掉輸入的重音)
-                clean_last = normalize_text(names[-1])
-                if clean_last != names[-1].lower():
-                    search_results.append(playerid_lookup(clean_last))
+                if potential_players.empty:
+                    # 如果連姓氏都搜不到，嘗試去掉重音再搜一次姓氏
+                    clean_last = normalize_text(last_name_to_search)
+                    potential_players = playerid_lookup(clean_last)
 
-                # 合併所有搜尋結果並進行比對
-                final_lookup = pd.concat(search_results).drop_duplicates() if search_results else pd.DataFrame()
-
-                if not final_lookup.empty:
-                    # 在結果中進行精確的「去重音比對」
-                    final_lookup['f_norm'] = final_lookup['name_first'].apply(normalize_text)
-                    final_lookup['l_norm'] = final_lookup['name_last'].apply(normalize_text)
+                if not potential_players.empty:
+                    # 在本地進行強大的「去重音比對」
+                    potential_players['f_norm'] = potential_players['name_first'].apply(normalize_text)
+                    potential_players['l_norm'] = potential_players['name_last'].apply(normalize_text)
                     
-                    if len(names) >= 2:
-                        match = final_lookup[
-                            (final_lookup['f_norm'] == normalize_text(names[0])) & 
-                            (final_lookup['l_norm'] == normalize_text(names[-1]))
-                        ].head(1)
-                    else:
-                        match = final_lookup.head(1)
+                    # 抓出你輸入的名字 (第一個單詞)
+                    input_first_norm = normalize_text(names[0])
+                    input_last_norm = normalize_text(names[-1])
+                    
+                    # 比對姓與名
+                    match = potential_players[
+                        (potential_players['f_norm'] == input_first_norm) & 
+                        (potential_players['l_norm'] == input_last_norm)
+                    ].head(1)
 
                     if not match.empty:
                         res = match.iloc[0]
@@ -115,7 +108,7 @@ if st.sidebar.button("查詢資料"):
                     else:
                         st.session_state.p_name = ""
                         st.session_state.data_cache = None
-                        st.error("比對失敗，請嘗試更精確的名字")
+                        st.error("比對失敗，請確認名字拼法（不需擔心重音符號）")
                 else:
                     st.session_state.p_name = ""
                     st.session_state.data_cache = None
