@@ -12,7 +12,7 @@ st.set_page_config(layout="wide", page_title="MLB 球員分析系統")
 # --- 1. 核心函數：處理特殊字元 ---
 def normalize_text(text):
     if not isinstance(text, str): return ""
-    # 將所有特殊重音符號轉為標準英文字母 (NFD 分解)
+    # 分解重音符號並移除 (例如 Báez -> baez)
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower().strip()
 
 # --- 2. 核心函數：動態球場牆界計算 ---
@@ -34,21 +34,18 @@ def transform_coords_refined(hc_x, hc_y, distance, events):
     ty = r * np.sin(theta)
     return tx, ty
 
-# --- 4. 繪圖函數 (強化視覺) ---
+# --- 4. 繪圖函數 ---
 def plot_spray_chart(df):
     fig = go.Figure()
     t_range = np.linspace(np.pi / 4, 3 * np.pi / 4, 100)
     wall_radii = [get_wall_radius(t) for t in t_range]
     wall_x = [r * np.cos(t) for r, t in zip(wall_radii, t_range)]
     wall_y = [r * np.sin(t) for r, t in zip(wall_radii, t_range)]
-
     fig.add_trace(go.Scatter(x=[0] + wall_x + [0], y=[0] + wall_y + [0], fill='toself', fillcolor='rgba(34, 139, 34, 0.2)', line_width=0, showlegend=False))
     fig.add_trace(go.Scatter(x=[0] + (145 * np.cos(t_range)).tolist() + [0], y=[0] + (145 * np.sin(t_range)).tolist() + [0], fill='toself', fillcolor='rgba(255, 165, 0, 0.3)', line_width=0, showlegend=False))
     fig.add_trace(go.Scatter(x=wall_x, y=wall_y, mode='lines', line=dict(color='red', dash='dash', width=3), name='全壘打牆'))
-
     s = 90 / np.sqrt(2)
     fig.add_trace(go.Scatter(x=[0, s, 0, -s, 0], y=[0, s, s * 2, s, 0], mode='lines+markers', line=dict(color='black', width=3), marker=dict(symbol='square', size=13, color='white', line=dict(width=1.5, color='black')), showlegend=False))
-
     for i, row in df.iterrows():
         tx, ty = transform_coords_refined(row['hc_x'], row['hc_y'], row['hit_distance_sc'], row['events'])
         if tx is not None:
@@ -57,11 +54,10 @@ def plot_spray_chart(df):
             line_color = 'gold' if is_hr else 'black'
             line_width = 3 if is_hr else 1.5
             fig.add_trace(go.Scatter(x=[tx], y=[ty], mode='markers', marker=dict(size=marker_size, color=row['color'], line=dict(width=line_width, color=line_color)), hovertemplate=f"打席: {i + 1}<br>結果: {row['events']}<br>距離: {row['hit_distance_sc']} ft", showlegend=False))
-    
     fig.update_layout(xaxis=dict(visible=False, range=[-400, 400], scaleanchor="y", scaleratio=1), yaxis=dict(visible=False, range=[-30, 500]), width=700, height=700, plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=30, b=0))
     return fig
 
-# --- 5. 核心數據邏輯：結構性搜尋 ---
+# --- 5. 數據邏輯：全球員結構化搜尋 ---
 if 'data_cache' not in st.session_state: st.session_state.data_cache = None
 if 'p_name' not in st.session_state: st.session_state.p_name = ""
 
@@ -72,33 +68,40 @@ if st.sidebar.button("查詢資料"):
     try:
         names = p_query.split()
         if len(names) >= 1:
-            with st.spinner('正在進行全球員數據比對...'):
-                last_name_input = names[-1]
-                first_name_input = names[0] if len(names) > 1 else ""
+            with st.spinner('正在分析全球員數據庫...'):
+                # 準備搜尋種子
+                first_raw = names[0]
+                last_raw = names[-1]
                 
-                # 1. 嘗試直接搜尋姓氏
-                potential_players = playerid_lookup(last_name_input)
-                
-                # 2. 如果失敗，嘗試去除輸入值的重音再搜一次 (處理 API 端的匹配問題)
-                if potential_players.empty:
-                    potential_players = playerid_lookup(normalize_text(last_name_input))
+                # 同時發動多路搜尋
+                results = []
+                results.append(playerid_lookup(last_raw, first_raw)) # 原始搜
+                results.append(playerid_lookup(last_raw))          # 只搜姓
 
-                if not potential_players.empty:
-                    # 3. 本地端進行全量標準化比對 (處理資料庫端的匹配問題)
-                    potential_players['f_norm'] = potential_players['name_first'].apply(normalize_text)
-                    potential_players['l_norm'] = potential_players['name_last'].apply(normalize_text)
+                # 暴力處理所有可能含有重音的情況
+                clean_last = normalize_text(last_raw)
+                if clean_last != last_raw.lower():
+                    results.append(playerid_lookup(clean_last))
+
+                # 合併所有候選清單
+                all_candidates = pd.concat(results).drop_duplicates(subset=['key_mlbam']) if results else pd.DataFrame()
+
+                if not all_candidates.empty:
+                    # 在本地端進行標準化比對
+                    all_candidates['f_norm'] = all_candidates['name_first'].apply(normalize_text)
+                    all_candidates['l_norm'] = all_candidates['name_last'].apply(normalize_text)
                     
-                    target_f = normalize_text(first_name_input)
-                    target_l = normalize_text(last_name_input)
+                    target_f = normalize_text(first_raw)
+                    target_l = normalize_text(last_raw)
                     
-                    # 篩選符合條件的球員，並取最近一年有打球的人
-                    match = potential_players[
-                        (potential_players['f_norm'] == target_f) & 
-                        (potential_players['l_norm'] == target_l)
+                    # 篩選最符合的人
+                    final = all_candidates[
+                        (all_candidates['f_norm'] == target_f) & 
+                        (all_candidates['l_norm'] == target_l)
                     ].sort_values('mlb_played_last', ascending=False).head(1)
 
-                    if not match.empty:
-                        res = match.iloc[0]
+                    if not final.empty:
+                        res = final.iloc[0]
                         st.session_state.p_name = f"{res['name_first']} {res['name_last']}"
                         pid = res['key_mlbam']
                         raw = statcast_batter('2024-03-01', '2026-12-31', pid)
@@ -106,11 +109,11 @@ if st.sidebar.button("查詢資料"):
                     else:
                         st.session_state.p_name = ""
                         st.session_state.data_cache = None
-                        st.error("找不到該球員，請確認拼法")
+                        st.error("比對失敗，請確認名字拼法")
                 else:
                     st.session_state.p_name = ""
                     st.session_state.data_cache = None
-                    st.error("查無此姓氏")
+                    st.error("找不到該球員")
     except Exception as e:
         st.error(f"連線異常: {e}")
 
@@ -122,7 +125,6 @@ if st.session_state.data_cache is not None and st.session_state.p_name != "":
     sel_date = st.sidebar.selectbox("選擇日期", dates)
     curr = df[df['game_date'] == sel_date].copy().sort_values('at_bat_number').reset_index(drop=True)
     curr['events'] = curr['events'].str.replace('_', ' ').str.replace('intent walk', 'intentional walk', case=False)
-    
     clist = ['#AEC7E8', '#FFBB78', '#98DF8A', '#FF9896', '#C5B0D5', '#C49C94', '#F7B6D2', '#DBDB8D', '#9EDAE5', '#D62728']
     curr['color'] = [clist[i % len(clist)] for i in range(len(curr))]
     
